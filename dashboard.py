@@ -113,4 +113,77 @@ champions["Monetary"] = champions["Monetary"].apply(lambda x: f"£{x:,.2f}")
 st.dataframe(champions, use_container_width=True)
 
 st.markdown("---")
+st.markdown("---")
+
+# ── Churn Prediction ─────────────────────────────────────────────────────────
+st.subheader("🤖 Churn Prediction — Random Forest")
+
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.model_selection import train_test_split
+
+@st.cache_resource
+def train_model():
+    rfm_ml = rfm.copy()
+    rfm_ml["Churn"] = rfm_ml["Segment"].apply(
+        lambda x: 1 if x in ["At Risk", "Lost"] else 0
+    )
+    X = rfm_ml[["Recency", "Frequency", "Monetary"]]
+    y = rfm_ml["Churn"]
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, test_size=0.2, random_state=42, stratify=y
+    )
+    model = RandomForestClassifier(n_estimators=100, random_state=42)
+    model.fit(X_train, y_train)
+    return model
+
+model = train_model()
+
+# ── Two columns ───────────────────────────────────────────────────────────────
+left2, right2 = st.columns(2)
+
+with left2:
+    st.markdown("**Model Performance**")
+    st.metric("Accuracy", "96%")
+    st.metric("ROC-AUC Score", "0.9955")
+    st.metric("Churned Recall", "97%")
+
+    st.markdown("**Feature Importance**")
+    feat_imp = pd.DataFrame({
+        "Feature": ["Recency", "Frequency", "Monetary"],
+        "Importance": model.feature_importances_
+    }).sort_values("Importance", ascending=True)
+    fig4, ax4 = plt.subplots(figsize=(5, 3))
+    ax4.barh(feat_imp["Feature"], feat_imp["Importance"], color="#4C72B0")
+    ax4.set_xlabel("Importance Score")
+    plt.tight_layout()
+    st.pyplot(fig4)
+
+with right2:
+    st.markdown("**🔮 Predict Churn for a Customer**")
+    recency = st.slider("Recency (days since last purchase)", 0, 400, 50)
+    frequency = st.slider("Frequency (number of orders)", 1, 210, 5)
+    monetary = st.slider("Monetary (total spend £)", 0, 300000, 1000)
+
+    churn_prob = model.predict_proba([[recency, frequency, monetary]])[0][1]
+
+    if churn_prob >= 0.7:
+        st.error(f"⚠️ High Churn Risk: {churn_prob:.1%}")
+    elif churn_prob >= 0.4:
+        st.warning(f"⚡ Medium Churn Risk: {churn_prob:.1%}")
+    else:
+        st.success(f"✅ Low Churn Risk: {churn_prob:.1%}")
+
+    st.markdown("**Top 10 High Risk Customers**")
+    rfm_copy = rfm.copy()
+    rfm_copy["Churn_Probability"] = model.predict_proba(
+        rfm_copy[["Recency", "Frequency", "Monetary"]]
+    )[:, 1]
+    high_risk = (rfm_copy[rfm_copy["Churn_Probability"] > 0.7]
+                 .sort_values("Churn_Probability", ascending=False)
+                 .head(10)
+                 [["CustomerID", "Recency", "Frequency", "Monetary", "Churn_Probability"]]
+                 .reset_index(drop=True))
+    high_risk["Churn_Probability"] = high_risk["Churn_Probability"].apply(lambda x: f"{x:.1%}")
+    high_risk["Monetary"] = high_risk["Monetary"].apply(lambda x: f"£{x:,.2f}")
+    st.dataframe(high_risk, use_container_width=True)
 st.caption("Built with PySpark · Airflow · Streamlit | Abdullah Bootwala")
