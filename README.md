@@ -79,8 +79,6 @@ UCI Online Retail Dataset — 541,909 transactions, Dec 2010 – Dec 2011
 
 ## How to Run
 
-## How to Run
-
 **Fastest way — no setup:** open the [live dashboard](https://ecommerce-pyspark-analysis-ckdjq8q6olrgtzf7a9kxfo.streamlit.app/) directly. It runs the full segmentation and analysis interactively — no install required.
 
 **To explore the underlying pipeline:**
