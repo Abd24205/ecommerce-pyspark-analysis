@@ -18,7 +18,7 @@ st.set_page_config(
 @st.cache_data
 def load_data():
     df = pd.read_csv("data/online_retail.csv", encoding="ISO-8859-1")
-    df.columns = df.columns.str.strip().str.replace("\ufeff", "", regex=False)
+    df.columns = df.columns.str.strip().str.replace("ï»¿", "", regex=False)
     df = df.dropna(subset=["CustomerID"])
     df = df[~df["InvoiceNo"].astype(str).str.startswith("C")]
     df = df[(df["Quantity"] > 0) & (df["UnitPrice"] > 0)]
