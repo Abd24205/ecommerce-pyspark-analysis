@@ -1,7 +1,11 @@
 import streamlit as st
 import pandas as pd
+import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
+from sklearn.model_selection import train_test_split
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import classification_report, roc_auc_score
 
 # ── Page config ──────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -13,8 +17,7 @@ st.set_page_config(
 # ── Load data ─────────────────────────────────────────────────────────────────
 @st.cache_data
 def load_data():
-    df = pd.read_csv("data/online_retail.csv", encoding="utf-8-sig")
-    df.columns = df.columns.str.strip()  # remove extra spaces from column names
+    df = pd.read_csv("data/online_retail.csv", encoding="ISO-8859-1")
     df = df.dropna(subset=["CustomerID"])
     df = df[~df["InvoiceNo"].astype(str).str.startswith("C")]
     df = df[(df["Quantity"] > 0) & (df["UnitPrice"] > 0)]
@@ -32,6 +35,72 @@ def load_rfm():
 
 df = load_data()
 rfm = load_rfm()
+
+# ── Churn model: trained with a TIME-BASED split (no label leakage) ──────────
+# Features come from behavior BEFORE the cutoff; the label comes from whether
+# the customer purchased again AFTER the cutoff. This is what makes the model
+# predict something genuinely unknown, instead of re-deriving the RFM segment
+# it was given as input.
+@st.cache_resource
+def train_churn_model(_df):
+    last_date = _df["InvoiceDate"].max()
+    cutoff_date = last_date - pd.Timedelta(days=90)
+
+    pre_cutoff = _df[_df["InvoiceDate"] < cutoff_date]
+    post_cutoff = _df[_df["InvoiceDate"] >= cutoff_date]
+
+    features = (pre_cutoff
+        .groupby("CustomerID")
+        .agg(
+            Recency=("InvoiceDate", lambda x: (cutoff_date - x.max()).days),
+            Frequency=("InvoiceNo", "nunique"),
+            Monetary=("TotalRevenue", "sum")
+        )
+        .reset_index()
+    )
+    features["Monetary"] = features["Monetary"].round(2)
+
+    active_after_cutoff = set(post_cutoff["CustomerID"].unique())
+    features["Churn"] = features["CustomerID"].apply(
+        lambda cid: 0 if cid in active_after_cutoff else 1
+    )
+
+    X = features[["Recency", "Frequency", "Monetary"]]
+    y = features["Churn"]
+
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, test_size=0.2, random_state=42, stratify=y
+    )
+
+    model = RandomForestClassifier(n_estimators=100, random_state=42, class_weight="balanced")
+    model.fit(X_train, y_train)
+
+    y_pred = model.predict(X_test)
+    y_prob = model.predict_proba(X_test)[:, 1]
+
+    report = classification_report(y_test, y_pred, target_names=["Active", "Churned"], output_dict=True)
+    auc = roc_auc_score(y_test, y_prob)
+
+    # Score EVERY current customer using the full dataset up to today, so the
+    # dashboard's "who's at risk right now" view is a real forward-looking
+    # prediction, not a restated segment label.
+    current_features = (_df
+        .groupby("CustomerID")
+        .agg(
+            Recency=("InvoiceDate", lambda x: (last_date - x.max()).days),
+            Frequency=("InvoiceNo", "nunique"),
+            Monetary=("TotalRevenue", "sum")
+        )
+        .reset_index()
+    )
+    current_features["Monetary"] = current_features["Monetary"].round(2)
+    current_features["Churn_Probability"] = model.predict_proba(
+        current_features[["Recency", "Frequency", "Monetary"]]
+    )[:, 1]
+
+    return model, report, auc, current_features
+
+model, report, auc, current_features = train_churn_model(df)
 
 # ── Header ────────────────────────────────────────────────────────────────────
 st.title("🛒 E-commerce Sales Dashboard")
@@ -74,7 +143,6 @@ st.markdown("---")
 # ── Two column layout ─────────────────────────────────────────────────────────
 left, right = st.columns(2)
 
-# Top 10 countries
 with left:
     st.subheader("🌍 Top 10 Countries by Revenue")
     top_countries = (df.groupby("Country")["TotalRevenue"]
@@ -88,7 +156,6 @@ with left:
     plt.tight_layout()
     st.pyplot(fig2)
 
-# RFM segments
 with right:
     st.subheader("👥 RFM Customer Segments")
     seg_counts = rfm["Segment"].value_counts().reset_index()
@@ -113,77 +180,65 @@ champions["Monetary"] = champions["Monetary"].apply(lambda x: f"£{x:,.2f}")
 st.dataframe(champions, use_container_width=True)
 
 st.markdown("---")
-st.markdown("---")
 
-# ── Churn Prediction ─────────────────────────────────────────────────────────
+# ── Churn Prediction section ──────────────────────────────────────────────────
 st.subheader("🤖 Churn Prediction — Random Forest")
+st.caption(
+    "Predicts whether a customer will make **zero purchases in the next 90 days**, "
+    "using only Recency/Frequency/Monetary as they stood *before* that window. "
+    "Trained and evaluated on separate time periods so the model can't see the "
+    "answer in its own inputs."
+)
 
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.model_selection import train_test_split
+perf_col, predict_col = st.columns(2)
 
-@st.cache_resource
-def train_model():
-    rfm_ml = rfm.copy()
-    rfm_ml["Churn"] = rfm_ml["Segment"].apply(
-        lambda x: 1 if x in ["At Risk", "Lost"] else 0
-    )
-    X = rfm_ml[["Recency", "Frequency", "Monetary"]]
-    y = rfm_ml["Churn"]
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=0.2, random_state=42, stratify=y
-    )
-    model = RandomForestClassifier(n_estimators=100, random_state=42)
-    model.fit(X_train, y_train)
-    return model
-
-model = train_model()
-
-# ── Two columns ───────────────────────────────────────────────────────────────
-left2, right2 = st.columns(2)
-
-with left2:
+with perf_col:
     st.markdown("**Model Performance**")
-    st.metric("Accuracy", "96%")
-    st.metric("ROC-AUC Score", "0.9955")
-    st.metric("Churned Recall", "97%")
+    m1, m2, m3 = st.columns(3)
+    m1.metric("Accuracy", f"{report['accuracy']*100:.0f}%")
+    m2.metric("ROC-AUC Score", f"{auc:.4f}")
+    m3.metric("Churned Recall", f"{report['Churned']['recall']*100:.0f}%")
 
     st.markdown("**Feature Importance**")
-    feat_imp = pd.DataFrame({
+    feat_importance = pd.DataFrame({
         "Feature": ["Recency", "Frequency", "Monetary"],
         "Importance": model.feature_importances_
     }).sort_values("Importance", ascending=True)
-    fig4, ax4 = plt.subplots(figsize=(5, 3))
-    ax4.barh(feat_imp["Feature"], feat_imp["Importance"], color="#4C72B0")
+    fig4, ax4 = plt.subplots(figsize=(6, 3))
+    ax4.barh(feat_importance["Feature"], feat_importance["Importance"], color="#4C72B0")
     ax4.set_xlabel("Importance Score")
     plt.tight_layout()
     st.pyplot(fig4)
 
-with right2:
+with predict_col:
     st.markdown("**🔮 Predict Churn for a Customer**")
-    recency = st.slider("Recency (days since last purchase)", 0, 400, 50)
-    frequency = st.slider("Frequency (number of orders)", 1, 210, 5)
-    monetary = st.slider("Monetary (total spend £)", 0, 300000, 1000)
+    recency_input = st.slider("Recency (days since last purchase)", 0, 400, 50)
+    frequency_input = st.slider("Frequency (number of orders)", 1, 250, 5)
+    monetary_input = st.slider("Monetary (total spend £)", 0, 10000, 1000)
 
-    churn_prob = model.predict_proba([[recency, frequency, monetary]])[0][1]
+    input_df = pd.DataFrame({
+        "Recency": [recency_input],
+        "Frequency": [frequency_input],
+        "Monetary": [monetary_input]
+    })
+    risk = model.predict_proba(input_df)[0, 1]
 
-    if churn_prob >= 0.7:
-        st.error(f"⚠️ High Churn Risk: {churn_prob:.1%}")
-    elif churn_prob >= 0.4:
-        st.warning(f"⚡ Medium Churn Risk: {churn_prob:.1%}")
+    if risk < 0.33:
+        st.success(f"✅ Low Churn Risk: {risk:.1%}")
+    elif risk < 0.66:
+        st.warning(f"⚠️ Medium Churn Risk: {risk:.1%}")
     else:
-        st.success(f"✅ Low Churn Risk: {churn_prob:.1%}")
+        st.error(f"🚨 High Churn Risk: {risk:.1%}")
 
     st.markdown("**Top 10 High Risk Customers**")
-    rfm_copy = rfm.copy()
-    rfm_copy["Churn_Probability"] = model.predict_proba(
-        rfm_copy[["Recency", "Frequency", "Monetary"]]
-    )[:, 1]
-    high_risk = (rfm_copy[rfm_copy["Churn_Probability"] > 0.7]
-                 .sort_values("Churn_Probability", ascending=False)
-                 .head(10)
-                 [["CustomerID", "Recency", "Frequency", "Monetary", "Churn_Probability"]]
-                 .reset_index(drop=True))
-    high_risk["Churn_Probability"] = high_risk["Churn_Probability"].apply(lambda x: f"{x:.1%}")
+    high_risk = (current_features
+        .sort_values("Churn_Probability", ascending=False)
+        .head(10)
+        [["CustomerID", "Recency", "Frequency", "Monetary", "Churn_Probability"]]
+        .reset_index(drop=True))
     high_risk["Monetary"] = high_risk["Monetary"].apply(lambda x: f"£{x:,.2f}")
+    high_risk["Churn_Probability"] = high_risk["Churn_Probability"].apply(lambda x: f"{x:.1%}")
     st.dataframe(high_risk, use_container_width=True)
+
+st.markdown("---")
 st.caption("Built with PySpark · Airflow · Streamlit | Abdullah Bootwala")
